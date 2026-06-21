@@ -1,0 +1,33 @@
+.pio/
+.vscode/
+waveshare_demo_tmp/
+
+# PlatformIO build artifacts
+.pioenvs/
+.piolibdeps/
+*.bin
+*.elf
+*.map
+*.hex
+*.uf2
+
+# Local runtime data and secrets
+.env
+.env.*
+secrets.*
+config.json
+wifi.json
+api_keys.json
+*.key
+*.pem
+*.crt
+
+# SD-card runtime folders copied locally
+/chats/
+/photos/
+/config/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+*.log
