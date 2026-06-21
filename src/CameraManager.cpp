@@ -1,6 +1,7 @@
 #include "CameraManager.h"
 #include "BoardPins.h"
 #include <SD.h>
+#include <esp_err.h>
 
 bool CameraManager::begin() {
     if (ready_) {
@@ -11,6 +12,10 @@ bool CameraManager::begin() {
         setError(F("Camera needs PSRAM"));
         return false;
     }
+
+    pinMode(BoardPins::CAM_PWDN, OUTPUT);
+    digitalWrite(BoardPins::CAM_PWDN, LOW);
+    delay(20);
 
     camera_config_t config = {};
     config.ledc_channel = LEDC_CHANNEL_0;
@@ -49,6 +54,19 @@ bool CameraManager::begin() {
     configureSensor();
     lastError_ = "";
     return true;
+}
+
+void CameraManager::end() {
+    if (!ready_) {
+        return;
+    }
+
+    esp_camera_deinit();
+    ready_ = false;
+    captureMode_ = false;
+    pinMode(BoardPins::CAM_PWDN, OUTPUT);
+    digitalWrite(BoardPins::CAM_PWDN, HIGH);
+    lastError_ = "";
 }
 
 bool CameraManager::isReady() const {

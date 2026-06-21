@@ -6,6 +6,7 @@
 class CameraManager {
 public:
     bool begin();
+    void end();
     bool isReady() const;
     camera_fb_t* capturePreviewFrame();
     camera_fb_t* capturePhotoFrame();

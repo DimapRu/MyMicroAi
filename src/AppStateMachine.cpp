@@ -308,6 +308,7 @@ void AppStateMachine::exitCameraMode() {
     cameraModeVisible_ = false;
     camera_.returnFrame(previewFrame_);
     previewFrame_ = nullptr;
+    camera_.end();
     workStatus_ = F("Ready");
     workUiDirty_ = true;
 }
@@ -325,6 +326,7 @@ void AppStateMachine::capturePhotoToQueue() {
     if (!previewFrame_) {
         cameraModeVisible_ = false;
         workStatus_ = camera_.lastError();
+        camera_.end();
         workUiDirty_ = true;
         redrawWorkMode();
         return;
@@ -341,6 +343,7 @@ void AppStateMachine::capturePhotoToQueue() {
         workStatus_ = camera_.lastError();
         camera_.returnFrame(previewFrame_);
         previewFrame_ = nullptr;
+        camera_.end();
         workUiDirty_ = true;
         redrawWorkMode();
         return;
@@ -355,6 +358,7 @@ void AppStateMachine::capturePhotoToQueue() {
     cameraModeVisible_ = false;
     camera_.returnFrame(previewFrame_);
     previewFrame_ = nullptr;
+    camera_.end();
     lastCameraFrameMs_ = 0;
     workUiDirty_ = true;
     redrawWorkMode();
