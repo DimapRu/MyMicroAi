@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <SD.h>
+#include "LogManager.h"
 #include "mbedtls/base64.h"
 
 namespace {
@@ -65,6 +66,28 @@ bool appendFileBase64(const String& path, String& out) {
     return true;
 }
 
+String summarizePayload(const String& payload) {
+    String summary;
+    summary.reserve(160);
+    summary += F("payload_bytes=");
+    summary += payload.length();
+    summary += F(" image_parts=");
+
+    int imageParts = 0;
+    int searchFrom = 0;
+    while (true) {
+        const int found = payload.indexOf(F("data:image/jpeg;base64,"), searchFrom);
+        if (found < 0) {
+            break;
+        }
+        ++imageParts;
+        searchFrom = found + 1;
+    }
+
+    summary += imageParts;
+    return summary;
+}
+
 bool postPayload(const AppConfig& config, const String& url, const String& payload, String& response, String& errorOut) {
     HTTPClient http;
     WiFiClientSecure secureClient;
@@ -80,6 +103,7 @@ bool postPayload(const AppConfig& config, const String& url, const String& paylo
 
     if (!httpStarted) {
         errorOut = F("Failed to start AI HTTP request");
+        LogManager::append(F("AI HTTP START FAILED"), String(F("url=")) + url + '\n' + summarizePayload(payload));
         return false;
     }
 
@@ -93,6 +117,20 @@ bool postPayload(const AppConfig& config, const String& url, const String& paylo
     http.end();
 
     if (httpCode < 200 || httpCode >= 300) {
+        String logMessage;
+        logMessage.reserve(response.length() + 256);
+        logMessage += F("url=");
+        logMessage += url;
+        logMessage += '\n';
+        logMessage += F("http_code=");
+        logMessage += httpCode;
+        logMessage += '\n';
+        logMessage += summarizePayload(payload);
+        logMessage += '\n';
+        logMessage += F("response=\n");
+        logMessage += response;
+        LogManager::append(F("AI HTTP ERROR"), logMessage);
+
         errorOut = F("AI HTTP ");
         errorOut += httpCode;
         if (response.length() > 0) {
@@ -149,6 +187,7 @@ bool AiClient::sendChat(const AppConfig& config, const std::vector<ChatMessage>&
     }
 
     if (response.length() > AI_RESPONSE_MAX_BYTES) {
+        LogManager::append(F("AI RESPONSE TOO LARGE"), String(F("bytes=")) + response.length() + '\n' + response.substring(0, 1024));
         setError(F("AI response is too large"));
         return false;
     }
@@ -244,6 +283,7 @@ bool AiClient::sendChatWithImages(const AppConfig& config, const std::vector<Cha
     }
 
     if (response.length() > AI_RESPONSE_MAX_BYTES) {
+        LogManager::append(F("AI RESPONSE TOO LARGE"), String(F("bytes=")) + response.length() + '\n' + response.substring(0, 1024));
         setError(F("AI response is too large"));
         return false;
     }

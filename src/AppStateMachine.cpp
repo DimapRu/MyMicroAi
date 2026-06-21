@@ -1,5 +1,6 @@
 #include "AppStateMachine.h"
 #include <SD.h>
+#include "LogManager.h"
 
 namespace {
 const char* modeName(AppMode mode) {
@@ -44,6 +45,8 @@ void AppStateMachine::begin() {
         enterConfigurationMode();
         return;
     }
+
+    LogManager::clear();
 
     if (!config_.load(storage_)) {
         Serial.printf("Config warning: %s\n", config_.lastError());
