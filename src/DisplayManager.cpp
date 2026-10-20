@@ -1,5 +1,6 @@
 #include "DisplayManager.h"
 #include "BoardPins.h"
+#include "Utf8.h"
 
 namespace {
 static constexpr int32_t DISPLAY_WIDTH = 240;
@@ -20,6 +21,11 @@ static constexpr int32_t CHAT_INPUT_Y = 204;
 static constexpr int32_t KEYBOARD_Y = 0;
 static constexpr int32_t KEYBOARD_SCREEN_W = 320;
 static constexpr int32_t KEYBOARD_SCREEN_H = 240;
+static constexpr int32_t ERROR_BUTTON_Y = 186;
+static constexpr int32_t ERROR_BUTTON_W = 140;
+static constexpr int32_t ERROR_BUTTON_H = 42;
+static constexpr int32_t ERROR_RETRY_X = 12;
+static constexpr int32_t ERROR_SETUP_X = 168;
 static constexpr int32_t KEY_W = 46;
 static constexpr int32_t KEY_H = 31;
 static constexpr uint16_t COLOR_BACKGROUND = 0x0000;
@@ -193,6 +199,7 @@ void DisplayManager::showConfigurationMode(const String& address) {
         return;
     }
 
+    errorButtonsVisible_ = false;
     display_.setTextSize(1);
     display_.fillScreen(COLOR_BACKGROUND);
     drawHeader("[ AP MODE ]", COLOR_BACKGROUND);
@@ -259,6 +266,7 @@ void DisplayManager::showChatWorkMode(const std::vector<ChatSessionInfo>& sessio
     clearChatsConfirmVisible_ = clearChatsConfirmVisible;
     chatsMenuOffset_ = chatsMenuOffset;
     cameraPreviewVisible_ = false;
+    errorButtonsVisible_ = false;
     display_.setTextSize(1);
     display_.fillScreen(COLOR_BACKGROUND);
     display_.fillRect(0, 0, KEYBOARD_SCREEN_W, 24, COLOR_BACKGROUND);
@@ -282,11 +290,7 @@ void DisplayManager::showChatWorkMode(const std::vector<ChatSessionInfo>& sessio
     display_.setTextColor(COLOR_MUTED, COLOR_BACKGROUND);
     display_.setCursor(92, 40);
     if (activeIndex >= 0 && static_cast<size_t>(activeIndex) < sessions.size()) {
-        String title = sessions[activeIndex].title;
-        if (title.length() > 10) {
-            title = title.substring(0, 10);
-        }
-        display_.print(title);
+        display_.print(Utf8::prefixChars(sessions[activeIndex].title, 10));
     } else {
         display_.print("No chat");
     }
@@ -310,6 +314,7 @@ void DisplayManager::showChatWorkMode(const std::vector<ChatSessionInfo>& sessio
 
     const int32_t viewportHeight = max<int32_t>(0, messageBottom - messageTop);
     const int32_t maxScroll = max<int32_t>(0, contentHeight - viewportHeight);
+    chatMaxScroll_ = maxScroll;
     const int32_t effectiveScroll = min<int32_t>(max<int32_t>(scrollOffset, 0), maxScroll);
     int32_t y = messageTop - effectiveScroll;
 
@@ -421,11 +426,7 @@ void DisplayManager::showCameraPreview(camera_fb_t* frame, size_t queuedPhotos, 
         display_.fillRect(8, 216, 84, 14, COLOR_BACKGROUND);
         if (statusText.length() > 0) {
             display_.setCursor(10, 217);
-            String clipped = statusText;
-            if (clipped.length() > 14) {
-                clipped = clipped.substring(0, 14);
-            }
-            display_.print(clipped);
+            display_.print(Utf8::prefixChars(statusText, 14));
         }
     }
 }
@@ -435,14 +436,55 @@ void DisplayManager::showError(AppError error, const char* message) {
         return;
     }
 
+    workButtonVisible_ = false;
+    errorButtonsVisible_ = true;
     display_.fillScreen(COLOR_BACKGROUND);
     drawHeader("ERROR", COLOR_ERROR);
     display_.setTextColor(COLOR_ERROR, COLOR_BACKGROUND);
     display_.setTextSize(2);
-    display_.setCursor(12, 58);
+    display_.setCursor(12, 50);
     display_.printf("Code: %u", static_cast<unsigned>(error));
     display_.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
-    drawWrappedText(message, 12, 96, 216, 22);
+    drawWrappedText(message, 12, 82, 296, 22);
+
+    display_.setTextSize(2);
+    display_.fillRoundRect(ERROR_RETRY_X, ERROR_BUTTON_Y, ERROR_BUTTON_W, ERROR_BUTTON_H, 8, COLOR_ACCENT);
+    display_.setTextColor(COLOR_BACKGROUND, COLOR_ACCENT);
+    display_.setCursor(ERROR_RETRY_X + 38, ERROR_BUTTON_Y + 13);
+    display_.print("RETRY");
+    display_.drawRoundRect(ERROR_SETUP_X, ERROR_BUTTON_Y, ERROR_BUTTON_W, ERROR_BUTTON_H, 8, COLOR_MUTED);
+    display_.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+    display_.setCursor(ERROR_SETUP_X + 38, ERROR_BUTTON_Y + 13);
+    display_.print("SETUP");
+}
+
+ErrorUiAction DisplayManager::pollErrorAction() {
+    if (!ready_ || !touchReady_ || !errorButtonsVisible_) {
+        return ErrorUiAction::None;
+    }
+
+    uint16_t x = 0;
+    uint16_t y = 0;
+    if (!consumeTouch(x, y, 400)) {
+        return ErrorUiAction::None;
+    }
+
+    if (y < ERROR_BUTTON_Y || y > ERROR_BUTTON_Y + ERROR_BUTTON_H) {
+        return ErrorUiAction::None;
+    }
+    if (x >= ERROR_RETRY_X && x <= ERROR_RETRY_X + ERROR_BUTTON_W) {
+        errorButtonsVisible_ = false;
+        return ErrorUiAction::Retry;
+    }
+    if (x >= ERROR_SETUP_X && x <= ERROR_SETUP_X + ERROR_BUTTON_W) {
+        errorButtonsVisible_ = false;
+        return ErrorUiAction::Setup;
+    }
+    return ErrorUiAction::None;
+}
+
+int32_t DisplayManager::chatMaxScroll() const {
+    return chatMaxScroll_;
 }
 
 bool DisplayManager::pollChatAction(ChatUiAction& action) {
@@ -736,12 +778,8 @@ void DisplayManager::drawChatsMenu(const std::vector<ChatSessionInfo>& sessions,
             display_.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
         }
 
-        String title = sessions[index].title;
-        if (title.length() > 28) {
-            title = title.substring(0, 28);
-        }
         display_.setCursor(24, rowY + 2);
-        display_.print(title);
+        display_.print(Utf8::prefixChars(sessions[index].title, 28));
     }
 
     display_.fillRoundRect(14, 198, 64, 30, 7, COLOR_BACKGROUND);

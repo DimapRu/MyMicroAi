@@ -10,6 +10,8 @@ waveshare_demo_tmp/
 *.map
 *.hex
 *.uf2
+# Root CA bundle for TLS verification (public data, embedded in firmware)
+!data/cert/x509_crt_bundle.bin
 
 # Local runtime data and secrets
 .env

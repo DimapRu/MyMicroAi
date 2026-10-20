@@ -4,6 +4,26 @@
 
 namespace {
 SPIClass sdSpi(FSPI);
+
+bool readRange(File& file, size_t offset, size_t length, String& outContent) {
+    if (!file.seek(offset)) {
+        return false;
+    }
+
+    outContent.reserve(length + 1);
+    char buffer[512];
+    size_t remaining = length;
+    while (remaining > 0) {
+        const size_t chunk = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+        const size_t readBytes = file.read(reinterpret_cast<uint8_t*>(buffer), chunk);
+        if (readBytes == 0) {
+            return false;
+        }
+        outContent.concat(buffer, readBytes);
+        remaining -= readBytes;
+    }
+    return true;
+}
 }
 
 bool StorageManager::begin() {
@@ -61,18 +81,49 @@ bool StorageManager::readTextFile(const char* path, String& outContent, size_t m
         return false;
     }
 
-    size_t fileSize = file.size();
-    if (fileSize > maxBytes) {
+    const size_t size = file.size();
+    if (size > maxBytes) {
         file.close();
         return false;
     }
 
-    outContent.reserve(fileSize + 1);
-    while (file.available()) {
-        outContent += static_cast<char>(file.read());
-    }
+    const bool ok = readRange(file, 0, size, outContent);
     file.close();
-    return true;
+    return ok;
+}
+
+bool StorageManager::readTextFileTail(const char* path, String& outContent, size_t maxBytes) const {
+    outContent = "";
+
+    if (!ready_) {
+        return false;
+    }
+
+    File file = SD.open(path, FILE_READ);
+    if (!file) {
+        return false;
+    }
+
+    const size_t size = file.size();
+    const size_t offset = size > maxBytes ? size - maxBytes : 0;
+    const bool ok = readRange(file, offset, size - offset, outContent);
+    file.close();
+    return ok;
+}
+
+size_t StorageManager::fileSize(const char* path) const {
+    if (!ready_) {
+        return 0;
+    }
+
+    File file = SD.open(path, FILE_READ);
+    if (!file) {
+        return 0;
+    }
+
+    const size_t size = file.size();
+    file.close();
+    return size;
 }
 
 bool StorageManager::writeTextFileAtomic(const char* path, const String& content) const {

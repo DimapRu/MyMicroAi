@@ -4,6 +4,7 @@
 #include <WiFiClientSecure.h>
 #include <SD.h>
 #include "LogManager.h"
+#include "TlsConfig.h"
 #include "mbedtls/base64.h"
 
 namespace {
@@ -95,7 +96,7 @@ bool postPayload(const AppConfig& config, const String& url, const String& paylo
     bool httpStarted = false;
 
     if (url.startsWith("https://")) {
-        secureClient.setInsecure();
+        configureTls(secureClient);
         httpStarted = http.begin(secureClient, url);
     } else {
         httpStarted = http.begin(plainClient, url);
@@ -130,6 +131,13 @@ bool postPayload(const AppConfig& config, const String& url, const String& paylo
         logMessage += F("response=\n");
         logMessage += response;
         LogManager::append(F("AI HTTP ERROR"), logMessage);
+
+        if (httpCode < 0) {
+            // Negative codes are transport failures: DNS, TCP or a rejected TLS certificate.
+            errorOut = F("Connection failed: ");
+            errorOut += HTTPClient::errorToString(httpCode);
+            return false;
+        }
 
         errorOut = F("AI HTTP ");
         errorOut += httpCode;

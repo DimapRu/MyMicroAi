@@ -11,6 +11,8 @@ public:
     bool exists(const char* path) const;
     bool ensureDirectory(const char* path) const;
     bool readTextFile(const char* path, String& outContent, size_t maxBytes) const;
+    bool readTextFileTail(const char* path, String& outContent, size_t maxBytes) const;
+    size_t fileSize(const char* path) const;
     bool writeTextFileAtomic(const char* path, const String& content) const;
     bool appendTextFile(const char* path, const String& content) const;
     bool remove(const char* path) const;

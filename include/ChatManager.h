@@ -6,7 +6,7 @@
 
 static constexpr size_t CHAT_MAX_MESSAGES = 16;
 static constexpr size_t CHAT_MAX_SESSIONS = 12;
-static constexpr size_t CHAT_MAX_MESSAGE_TEXT = 900;
+static constexpr size_t CHAT_MAX_MESSAGE_TEXT = 2560;
 
 struct ChatMessage {
     String role;
@@ -46,6 +46,7 @@ private:
     bool saveIndex();
     bool ensureDefaultChat();
     bool parseJsonLine(const String& line, ChatMessage& message) const;
+    bool compactActiveChat();
     String chatPath(const String& id) const;
     String makeChatId(uint32_t number) const;
     String makeTitleFromText(const String& text) const;

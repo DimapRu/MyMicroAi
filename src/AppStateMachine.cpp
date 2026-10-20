@@ -1,8 +1,12 @@
 #include "AppStateMachine.h"
 #include <SD.h>
 #include "LogManager.h"
+#include "Utf8.h"
 
 namespace {
+static constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 15000;
+static constexpr int32_t CHAT_SCROLL_STEP = 42;
+
 const char* modeName(AppMode mode) {
     switch (mode) {
         case AppMode::Boot: return "Boot";
@@ -66,6 +70,69 @@ void AppStateMachine::update() {
 
     if (mode_ == AppMode::Work) {
         updateWorkMode();
+        return;
+    }
+
+    if (mode_ == AppMode::Error) {
+        updateErrorMode();
+    }
+}
+
+void AppStateMachine::updateErrorMode() {
+    const ErrorUiAction action = display_.pollErrorAction();
+    if (action == ErrorUiAction::Retry) {
+        Serial.println(F("Error screen: retry, restarting"));
+        delay(100);
+        ESP.restart();
+        return;
+    }
+
+    if (action == ErrorUiAction::Setup) {
+        Serial.println(F("Error screen: opening setup"));
+        if (!storage_.isReady()) {
+            storage_.begin();
+        }
+        enterConfigurationMode();
+        return;
+    }
+
+    // A Wi-Fi failure usually fixes itself (router reboot, out of range), so
+    // keep retrying in the background and resume Work Mode once connected.
+    if (error_ == AppError::WifiFailed && config_.config().isComplete()) {
+        if (network_.isStationConnected()) {
+            error_ = AppError::None;
+            enterWorkMode();
+            return;
+        }
+        if (millis() - lastWifiRetryMs_ > WIFI_RETRY_INTERVAL_MS) {
+            lastWifiRetryMs_ = millis();
+            network_.retryStation(config_.config());
+        }
+    }
+}
+
+void AppStateMachine::watchWifi() {
+    if (network_.isStationConnected()) {
+        if (wifiLost_) {
+            wifiLost_ = false;
+            workStatus_ = F("Wi-Fi reconnected");
+            workUiDirty_ = true;
+        }
+        return;
+    }
+
+    if (!wifiLost_) {
+        wifiLost_ = true;
+        lastWifiRetryMs_ = millis();
+        workStatus_ = F("Wi-Fi lost, reconnecting...");
+        workUiDirty_ = true;
+        LogManager::append(F("WIFI LOST"), F("station disconnected in Work Mode"));
+        return;
+    }
+
+    if (millis() - lastWifiRetryMs_ > WIFI_RETRY_INTERVAL_MS) {
+        lastWifiRetryMs_ = millis();
+        network_.retryStation(config_.config());
     }
 }
 
@@ -109,10 +176,7 @@ void AppStateMachine::enterWorkMode() {
 }
 
 void AppStateMachine::updateWorkMode() {
-    if (!network_.isStationConnected()) {
-        enterError(AppError::WifiFailed, "WiFi connection lost");
-        return;
-    }
+    watchWifi();
 
     if (cameraModeVisible_) {
         redrawCameraPreview(false);
@@ -244,14 +308,11 @@ void AppStateMachine::updateWorkMode() {
                 workUiDirty_ = true;
                 break;
             case ChatUiActionType::ScrollUp:
-                chatScrollOffset_ += 28;
-                if (chatScrollOffset_ > 1200) {
-                    chatScrollOffset_ = 1200;
-                }
+                chatScrollOffset_ = min<int32_t>(chatScrollOffset_ + CHAT_SCROLL_STEP, display_.chatMaxScroll());
                 workUiDirty_ = true;
                 break;
             case ChatUiActionType::ScrollDown:
-                chatScrollOffset_ -= 28;
+                chatScrollOffset_ -= CHAT_SCROLL_STEP;
                 if (chatScrollOffset_ < 0) {
                     chatScrollOffset_ = 0;
                 }
@@ -262,13 +323,20 @@ void AppStateMachine::updateWorkMode() {
         }
     }
 
-    if (workUiDirty_) {
+    // The camera preview owns the screen; the chat redraws when it closes.
+    if (workUiDirty_ && !cameraModeVisible_) {
         redrawWorkMode();
     }
 }
 
 void AppStateMachine::redrawWorkMode() {
-    display_.showChatWorkMode(chat_.sessions(), chat_.activeIndex(), chat_.messages(), inputText_, keyboardVisible_, workStatus_, chatScrollOffset_, chatsMenuVisible_, chatsMenuOffset_, clearChatsConfirmVisible_);
+    if (pendingUserText_.length() == 0) {
+        display_.showChatWorkMode(chat_.sessions(), chat_.activeIndex(), chat_.messages(), inputText_, keyboardVisible_, workStatus_, chatScrollOffset_, chatsMenuVisible_, chatsMenuOffset_, clearChatsConfirmVisible_);
+    } else {
+        std::vector<ChatMessage> shown = chat_.messages();
+        shown.push_back(ChatMessage{"user", pendingUserText_});
+        display_.showChatWorkMode(chat_.sessions(), chat_.activeIndex(), shown, inputText_, keyboardVisible_, workStatus_, chatScrollOffset_, chatsMenuVisible_, chatsMenuOffset_, clearChatsConfirmVisible_);
+    }
     workUiDirty_ = false;
 }
 
@@ -381,27 +449,42 @@ void AppStateMachine::sendCurrentMessage() {
         return;
     }
 
-    const String userText = inputText_;
+    if (!network_.isStationConnected()) {
+        workStatus_ = F("No Wi-Fi, message kept");
+        return;
+    }
+
+    const String userText = Utf8::truncateBytes(inputText_, CHAT_MAX_MESSAGE_TEXT);
     inputText_ = "";
     keyboardVisible_ = false;
     chatScrollOffset_ = 0;
+    pendingUserText_ = userText;
     workStatus_ = F("Sending...");
     redrawWorkMode();
 
-    if (!chat_.appendMessage("user", userText)) {
-        workStatus_ = chat_.lastError();
-        return;
+    // The turn is saved only after the AI answers, so a failed request leaves
+    // no orphan user message or error text in the history sent next time.
+    std::vector<ChatMessage> request;
+    for (const ChatMessage& message : chat_.messages()) {
+        // Older firmware stored request failures as assistant replies.
+        if (message.role == F("assistant") && message.content.startsWith(F("Error: "))) {
+            continue;
+        }
+        request.push_back(message);
     }
+    request.push_back(ChatMessage{"user", userText});
 
-    redrawWorkMode();
     String assistantReply;
-    if (!ai_.sendChatWithImages(config_.config(), chat_.messages(), pendingPhotos_, assistantReply)) {
+    const bool sent = ai_.sendChatWithImages(config_.config(), request, pendingPhotos_, assistantReply);
+    pendingUserText_ = "";
+    if (!sent) {
+        // Put the text back so tapping Send retries; queued photos stay too.
+        inputText_ = userText;
         workStatus_ = ai_.lastError();
-        chat_.appendMessage("assistant", String(F("Error: ")) + workStatus_);
         return;
     }
 
-    if (!chat_.appendMessage("assistant", assistantReply)) {
+    if (!chat_.appendMessage("user", userText) || !chat_.appendMessage("assistant", assistantReply)) {
         workStatus_ = chat_.lastError();
         return;
     }

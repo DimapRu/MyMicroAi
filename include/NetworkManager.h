@@ -11,6 +11,7 @@
 class NetworkManager {
 public:
     bool beginStation(const AppConfig& config, uint32_t timeoutMs);
+    void retryStation(const AppConfig& config);
     void beginConfigPortal(ConfigManager& configManager, StorageManager& storage);
     void handleClient();
     bool isStationConnected() const;

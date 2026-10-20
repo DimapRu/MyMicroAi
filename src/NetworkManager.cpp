@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include "TlsConfig.h"
 
 namespace {
 static constexpr const char* AP_SSID = "MyMicroAI-Setup";
@@ -63,7 +64,13 @@ void appendModelName(String& response, const String& modelName, bool& firstModel
 }
 
 bool NetworkManager::beginStation(const AppConfig& config, uint32_t timeoutMs) {
+    if (WiFi.getMode() == WIFI_STA && WiFi.status() == WL_CONNECTED) {
+        lastError_ = "";
+        return true;
+    }
+
     WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
     WiFi.begin(config.wifiSsid.c_str(), config.wifiPassword.c_str());
 
     const uint32_t startedAt = millis();
@@ -81,6 +88,16 @@ bool NetworkManager::beginStation(const AppConfig& config, uint32_t timeoutMs) {
 
     lastError_ = "";
     return true;
+}
+
+void NetworkManager::retryStation(const AppConfig& config) {
+    if (WiFi.status() == WL_CONNECTED) {
+        return;
+    }
+
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(config.wifiSsid.c_str(), config.wifiPassword.c_str());
 }
 
 void NetworkManager::beginConfigPortal(ConfigManager& configManager, StorageManager& storage) {
@@ -231,7 +248,7 @@ void NetworkManager::handleModelScan() {
     bool httpStarted = false;
 
     if (modelsUrl.startsWith("https://")) {
-        secureClient.setInsecure();
+        configureTls(secureClient);
         httpStarted = http.begin(secureClient, modelsUrl);
     } else {
         httpStarted = http.begin(plainClient, modelsUrl);
@@ -246,6 +263,11 @@ void NetworkManager::handleModelScan() {
     http.addHeader("Authorization", String("Bearer ") + apiKey);
     http.addHeader("Accept", "application/json");
     const int httpCode = http.GET();
+    if (httpCode < 0) {
+        http.end();
+        sendJsonError(502, "Не удалось подключиться к провайдеру (сеть или TLS-сертификат)");
+        return;
+    }
     if (httpCode < 200 || httpCode >= 300) {
         http.end();
         sendJsonError(502, "Провайдер отклонил запрос /models");

@@ -60,8 +60,14 @@ include/
   ChatManager.h       SD-backed chat sessions
   ConfigManager.h     Runtime configuration storage
   DisplayManager.h    LCD, touch, keyboard, chat, and camera UI
+  LogManager.h        SD-card runtime log
   NetworkManager.h    Setup AP and web configuration portal
   StorageManager.h    SD card bootstrap
+  TlsConfig.h         Root CA bundle hookup for HTTPS
+  Utf8.h              UTF-8 safe string clipping
+
+data/cert/
+  x509_crt_bundle.bin Mozilla root CA bundle embedded into the firmware
 
 src/
   AiClient.cpp
@@ -70,6 +76,7 @@ src/
   ChatManager.cpp
   ConfigManager.cpp
   DisplayManager.cpp
+  LogManager.cpp
   NetworkManager.cpp
   StorageManager.cpp
   main.cpp
@@ -119,12 +126,18 @@ MyMicroAI sends requests to an OpenAI-compatible chat completions endpoint. The 
 
 Queued camera photos are encoded as JPEG data URLs and sent together with the text prompt for models that support image input.
 
+A message is saved to the chat only after the AI answers. If a request fails, the error is shown in the status line and the text is put back into the input, so tapping Send retries it.
+
+### TLS
+
+HTTPS certificates are verified against the Mozilla root CA bundle in `data/cert/x509_crt_bundle.bin`, embedded via `board_build.embed_files`. To refresh it, run ESP-IDF v4.4 `components/mbedtls/esp_crt_bundle/gen_crt_bundle.py -i cacrt_all.pem` (the v4.4 script matches the bundle format of Arduino-ESP32 2.x) and copy the resulting `x509_crt_bundle` over the file. A provider with a self-signed certificate will be rejected; use plain `http://` for local servers.
+
 ## Storage
 
 The SD card is used for runtime data:
 
 - `config.json` — local device configuration
-- chat logs and sessions
+- chat logs and sessions (each chat file is compacted to its latest messages once it grows past 64 KB)
 - temporary captured photos before sending
 
 These runtime files and folders are ignored by Git to prevent accidental leaks of private data.
@@ -133,6 +146,7 @@ These runtime files and folders are ignored by Git to prevent accidental leaks o
 
 - No API keys are committed.
 - No Wi-Fi passwords are committed.
+- HTTPS connections to the AI provider verify the server certificate.
 - Generated build folders are ignored.
 - Local VS Code and PlatformIO artifacts are ignored.
 - SD-card runtime data is ignored.

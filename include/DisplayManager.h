@@ -49,6 +49,12 @@ struct ChatUiAction {
     int index = -1;
 };
 
+enum class ErrorUiAction : uint8_t {
+    None,
+    Retry,
+    Setup
+};
+
 enum class KeyboardLayout : uint8_t {
     English,
     Russian,
@@ -77,6 +83,8 @@ public:
     void showStatus(const char* title, const char* message);
     void refreshKeyboardPreview(const String& inputText);
     bool pollChatAction(ChatUiAction& action);
+    ErrorUiAction pollErrorAction();
+    int32_t chatMaxScroll() const;
     bool wasWorkSettingsButtonPressed();
 
 private:
@@ -88,6 +96,8 @@ private:
     bool chatsMenuVisible_ = false;
     bool clearChatsConfirmVisible_ = false;
     bool cameraPreviewVisible_ = false;
+    bool errorButtonsVisible_ = false;
+    int32_t chatMaxScroll_ = 0;
     int chatsMenuOffset_ = 0;
     KeyboardLayout keyboardLayout_ = KeyboardLayout::English;
     bool touchHeld_ = false;

@@ -28,6 +28,7 @@ private:
     CameraManager camera_;
     String inputText_;
     String workStatus_;
+    String pendingUserText_;
     bool keyboardVisible_ = false;
     bool chatsMenuVisible_ = false;
     bool clearChatsConfirmVisible_ = false;
@@ -35,6 +36,8 @@ private:
     int chatsMenuOffset_ = 0;
     int32_t chatScrollOffset_ = 0;
     bool workUiDirty_ = false;
+    bool wifiLost_ = false;
+    uint32_t lastWifiRetryMs_ = 0;
     uint32_t lastSettingsTouchMs_ = 0;
     uint32_t lastCameraFrameMs_ = 0;
     uint16_t nextPhotoId_ = 1;
@@ -44,6 +47,8 @@ private:
     void enterConfigurationMode();
     void enterWorkMode();
     void updateWorkMode();
+    void updateErrorMode();
+    void watchWifi();
     void redrawWorkMode();
     void redrawCameraPreview(bool forceFrame);
     void enterCameraMode();

@@ -1,11 +1,14 @@
 #include "ChatManager.h"
 #include <ArduinoJson.h>
+#include "Utf8.h"
 
 namespace {
 static constexpr const char* CHAT_DIR = "/chats";
 static constexpr const char* CHAT_INDEX_PATH = "/chats/index.json";
 static constexpr size_t CHAT_INDEX_MAX_BYTES = 8192;
-static constexpr size_t CHAT_FILE_MAX_BYTES = 32768;
+// Chat files are append-only; once one grows past this size it is rewritten
+// with only the messages kept in memory, so it can never block booting.
+static constexpr size_t CHAT_FILE_MAX_BYTES = 65536;
 
 String jsonLineEscape(const String& value) {
     String escaped;
@@ -22,6 +25,17 @@ String jsonLineEscape(const String& value) {
         }
     }
     return escaped;
+}
+
+String serializeMessage(const String& role, const String& content) {
+    String line;
+    line.reserve(content.length() + 48);
+    line += F("{\"role\":\"");
+    line += jsonLineEscape(role);
+    line += F("\",\"content\":\"");
+    line += jsonLineEscape(content);
+    line += F("\"}\n");
+    return line;
 }
 }
 
@@ -129,18 +143,8 @@ bool ChatManager::appendMessage(const char* role, const String& content) {
         return false;
     }
 
-    String clipped = content;
-    if (clipped.length() > CHAT_MAX_MESSAGE_TEXT) {
-        clipped = clipped.substring(0, CHAT_MAX_MESSAGE_TEXT);
-    }
-
-    String line;
-    line.reserve(clipped.length() + 48);
-    line += F("{\"role\":\"");
-    line += jsonLineEscape(String(role));
-    line += F("\",\"content\":\"");
-    line += jsonLineEscape(clipped);
-    line += F("\"}\n");
+    const String clipped = Utf8::truncateBytes(content, CHAT_MAX_MESSAGE_TEXT);
+    const String line = serializeMessage(String(role), clipped);
 
     const String path = chatPath(activeId_);
     if (!storage_->appendTextFile(path.c_str(), line)) {
@@ -153,6 +157,11 @@ bool ChatManager::appendMessage(const char* role, const String& content) {
     message.content = clipped;
     messages_.push_back(message);
     trimLoadedMessages();
+
+    if (storage_->fileSize(path.c_str()) > CHAT_FILE_MAX_BYTES) {
+        // Best effort: if this fails the tail read in loadMessages still copes.
+        compactActiveChat();
+    }
 
     const int sessionIndex = findSessionIndex(activeId_);
     if (sessionIndex >= 0) {
@@ -177,13 +186,19 @@ bool ChatManager::loadMessages() {
         return storage_->writeTextFileAtomic(path.c_str(), "");
     }
 
+    const bool oversized = storage_->fileSize(path.c_str()) > CHAT_FILE_MAX_BYTES;
     String content;
-    if (!storage_->readTextFile(path.c_str(), content, CHAT_FILE_MAX_BYTES)) {
+    if (!storage_->readTextFileTail(path.c_str(), content, CHAT_FILE_MAX_BYTES)) {
         setError(F("Failed to read chat file"));
         return false;
     }
 
     int start = 0;
+    if (oversized) {
+        // The tail read most likely starts mid-line; skip that partial line.
+        const int firstBreak = content.indexOf('\n');
+        start = firstBreak >= 0 ? firstBreak + 1 : static_cast<int>(content.length());
+    }
     while (start < static_cast<int>(content.length())) {
         const int end = content.indexOf('\n', start);
         String line = end >= 0 ? content.substring(start, end) : content.substring(start);
@@ -201,6 +216,23 @@ bool ChatManager::loadMessages() {
     }
 
     trimLoadedMessages();
+    if (oversized) {
+        compactActiveChat();
+    }
+    return true;
+}
+
+bool ChatManager::compactActiveChat() {
+    String content;
+    for (const ChatMessage& message : messages_) {
+        content += serializeMessage(message.role, message.content);
+    }
+
+    const String path = chatPath(activeId_);
+    if (!storage_->writeTextFileAtomic(path.c_str(), content)) {
+        setError(F("Failed to compact chat file"));
+        return false;
+    }
     return true;
 }
 
@@ -331,10 +363,8 @@ String ChatManager::makeTitleFromText(const String& text) const {
     if (title.length() == 0) {
         return F("New chat");
     }
-    if (title.length() > 22) {
-        title = title.substring(0, 22) + "...";
-    }
-    return title;
+    const String prefix = Utf8::prefixChars(title, 22);
+    return prefix.length() < title.length() ? prefix + "..." : title;
 }
 
 int ChatManager::findSessionIndex(const String& id) const {
