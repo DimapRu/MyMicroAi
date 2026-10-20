@@ -10,6 +10,7 @@
 #include "DisplayManager.h"
 #include "NetworkManager.h"
 #include "StorageManager.h"
+#include "UsbBridge.h"
 
 class AppStateMachine {
 public:
@@ -26,6 +27,7 @@ private:
     ChatManager chat_;
     AiClient ai_;
     CameraManager camera_;
+    UsbBridge usb_;
     String inputText_;
     String workStatus_;
     String pendingUserText_;
@@ -56,5 +58,11 @@ private:
     void capturePhotoToQueue();
     void cleanupPendingPhotos();
     void sendCurrentMessage();
+    bool runChatTurn(const String& userText, const std::vector<PhotoAttachment>& photos);
+    void handleUsb();
+    void handleUsbSend(const String& text);
+    void announceState();
+    void sendChatToUsb();
+    String activeChatTitle() const;
     void enterError(AppError error, const char* message);
 };

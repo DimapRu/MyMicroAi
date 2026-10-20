@@ -30,6 +30,7 @@ The project is built like a real product prototype: not just a board demo, but a
 - **First-run setup portal** — local Wi-Fi AP with a web wizard for network and AI provider configuration.
 - **Persistent SD-card memory** — saved config, chat sessions, message history, and temporary photos.
 - **Chat session manager** — create new chats, switch between old chats, scroll long replies, and clear all chats with confirmation.
+- **PC chat over USB** — plug the device into a computer and chat with the same AI from a browser page; the conversation is shared with the device screen.
 - **Full-screen keyboard** — English, Russian, numbers, symbols, backspace, space, send, and close controls.
 - **Optimized ESP32-S3 camera path** — OV5640 JPEG capture with PSRAM and SD-backed image queue.
 - **Public-safe repository** — no hardcoded API keys, Wi-Fi passwords, or personal credentials.
@@ -63,6 +64,7 @@ include/
   LogManager.h        SD-card runtime log
   NetworkManager.h    Setup AP and web configuration portal
   StorageManager.h    SD card bootstrap
+  UsbBridge.h         JSON-lines protocol for the PC chat over USB serial
   TlsConfig.h         Root CA bundle hookup for HTTPS
   Utf8.h              UTF-8 safe string clipping
 
@@ -79,7 +81,11 @@ src/
   LogManager.cpp
   NetworkManager.cpp
   StorageManager.cpp
+  UsbBridge.cpp
   main.cpp
+
+tools/pc-chat/
+  index.html          Browser chat for the PC (Web Serial, no install)
 ```
 
 ## First Boot Flow
@@ -131,6 +137,23 @@ A message is saved to the chat only after the AI answers. If a request fails, th
 ### TLS
 
 HTTPS certificates are verified against the Mozilla root CA bundle in `data/cert/x509_crt_bundle.bin`, embedded via `board_build.embed_files`. To refresh it, run ESP-IDF v4.4 `components/mbedtls/esp_crt_bundle/gen_crt_bundle.py -i cacrt_all.pem` (the v4.4 script matches the bundle format of Arduino-ESP32 2.x) and copy the resulting `x509_crt_bundle` over the file. A provider with a self-signed certificate will be rejected; use plain `http://` for local servers.
+
+## PC Chat over USB
+
+1. Connect the device to the computer with a USB cable and wait for Work Mode.
+2. Open [`tools/pc-chat/index.html`](tools/pc-chat/index.html) in Google Chrome or Microsoft Edge (Web Serial is not available in Firefox or Safari).
+3. Click **Подключить** and pick the device's serial port. Close the PlatformIO serial monitor first: only one program can hold the port.
+
+The browser remembers the port, so after the first time the page connects by itself whenever the device is plugged in; keep it open in a pinned tab. The device still talks to the AI over its own Wi-Fi: the PC only sends text and shows replies. Messages sent from the PC land in the active chat and appear on the device screen, and messages typed on the device show up on the PC. Photos queued on the device are not attached to messages sent from the PC.
+
+The firmware listens on `Serial` and, on boards where that is not the ESP32-S3 native USB port, on `USBSerial` as well, so it works whether the board's USB connector goes through a USB-UART bridge or straight to the chip.
+
+Protocol, one JSON object per line at 115200 baud:
+
+- PC → device: `{"cmd":"hello"}`, `{"cmd":"history"}`, `{"cmd":"send","text":"..."}`, `{"cmd":"new_chat"}`
+- Device → PC, each line prefixed with `@mma `: `hello` (with `state`: `work`, `setup`, `error`), `history_begin` / `message` / `history_end`, `message` (`role`, `content`), `status` (`thinking`), `error` (`text`)
+
+Lines without the `@mma ` prefix are ordinary debug logs; the page shows them under **Лог устройства**.
 
 ## Storage
 

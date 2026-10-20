@@ -31,6 +31,7 @@ void removeLastUtf8Character(String& text) {
 }
 
 void AppStateMachine::begin() {
+    usb_.begin();
     Serial.println(F("MyMicroAI boot sequence started"));
     display_.begin();
     display_.showBoot("Booting system...");
@@ -63,6 +64,8 @@ void AppStateMachine::begin() {
 }
 
 void AppStateMachine::update() {
+    handleUsb();
+
     if (mode_ == AppMode::Configuration) {
         network_.handleClient();
         return;
@@ -144,6 +147,7 @@ void AppStateMachine::enterConfigurationMode() {
     const String address = network_.localAddress();
     display_.showConfigurationMode(address);
     Serial.printf("SoftAP address: http://%s/\n", address.c_str());
+    announceState();
 }
 
 void AppStateMachine::enterWorkMode() {
@@ -173,6 +177,8 @@ void AppStateMachine::enterWorkMode() {
     workUiDirty_ = true;
     redrawWorkMode();
     Serial.printf("Connected. IP: %s\n", network_.localAddress().c_str());
+    announceState();
+    sendChatToUsb();
 }
 
 void AppStateMachine::updateWorkMode() {
@@ -198,6 +204,7 @@ void AppStateMachine::updateWorkMode() {
                     chatsMenuOffset_ = 0;
                     chatScrollOffset_ = 0;
                     workStatus_ = F("New chat");
+                    sendChatToUsb();
                 } else {
                     workStatus_ = chat_.lastError();
                 }
@@ -241,6 +248,7 @@ void AppStateMachine::updateWorkMode() {
                     chatsMenuVisible_ = false;
                     chatScrollOffset_ = 0;
                     workStatus_ = F("Chat switched");
+                    sendChatToUsb();
                 } else {
                     workStatus_ = chat_.lastError();
                 }
@@ -265,6 +273,7 @@ void AppStateMachine::updateWorkMode() {
                     chatsMenuOffset_ = 0;
                     chatScrollOffset_ = 0;
                     workStatus_ = F("All chats cleared");
+                    sendChatToUsb();
                 } else {
                     clearChatsConfirmVisible_ = false;
                     workStatus_ = chat_.lastError();
@@ -458,9 +467,20 @@ void AppStateMachine::sendCurrentMessage() {
     inputText_ = "";
     keyboardVisible_ = false;
     chatScrollOffset_ = 0;
+    if (!runChatTurn(userText, pendingPhotos_)) {
+        // Put the text back so tapping Send retries; queued photos stay too.
+        inputText_ = userText;
+        return;
+    }
+
+    cleanupPendingPhotos();
+}
+
+bool AppStateMachine::runChatTurn(const String& userText, const std::vector<PhotoAttachment>& photos) {
     pendingUserText_ = userText;
     workStatus_ = F("Sending...");
     redrawWorkMode();
+    usb_.sendStatus(F("thinking"));
 
     // The turn is saved only after the AI answers, so a failed request leaves
     // no orphan user message or error text in the history sent next time.
@@ -475,22 +495,118 @@ void AppStateMachine::sendCurrentMessage() {
     request.push_back(ChatMessage{"user", userText});
 
     String assistantReply;
-    const bool sent = ai_.sendChatWithImages(config_.config(), request, pendingPhotos_, assistantReply);
+    const bool sent = ai_.sendChatWithImages(config_.config(), request, photos, assistantReply);
     pendingUserText_ = "";
     if (!sent) {
-        // Put the text back so tapping Send retries; queued photos stay too.
-        inputText_ = userText;
         workStatus_ = ai_.lastError();
-        return;
+        usb_.sendError(workStatus_);
+        return false;
     }
 
     if (!chat_.appendMessage("user", userText) || !chat_.appendMessage("assistant", assistantReply)) {
         workStatus_ = chat_.lastError();
+        usb_.sendError(workStatus_);
+        return false;
+    }
+
+    usb_.sendMessage(F("user"), chat_.messages()[chat_.messages().size() - 2].content);
+    usb_.sendMessage(F("assistant"), chat_.messages().back().content);
+    workStatus_ = F("Ready");
+    return true;
+}
+
+void AppStateMachine::handleUsb() {
+    UsbCommand command;
+    if (!usb_.poll(command)) {
         return;
     }
 
-    cleanupPendingPhotos();
-    workStatus_ = F("Ready");
+    if (command.type == UsbCommandType::Hello) {
+        announceState();
+        return;
+    }
+
+    if (mode_ != AppMode::Work) {
+        usb_.sendError(F("Device is not in Work Mode"));
+        return;
+    }
+
+    switch (command.type) {
+        case UsbCommandType::History:
+            sendChatToUsb();
+            break;
+        case UsbCommandType::NewChat:
+            if (cameraModeVisible_) {
+                exitCameraMode();
+            }
+            if (chat_.createChat()) {
+                chatsMenuVisible_ = false;
+                clearChatsConfirmVisible_ = false;
+                chatsMenuOffset_ = 0;
+                chatScrollOffset_ = 0;
+                workStatus_ = F("New chat (PC)");
+                sendChatToUsb();
+            } else {
+                workStatus_ = chat_.lastError();
+                usb_.sendError(workStatus_);
+            }
+            workUiDirty_ = true;
+            break;
+        case UsbCommandType::Send:
+            handleUsbSend(command.text);
+            break;
+        case UsbCommandType::Hello:
+        case UsbCommandType::None:
+            break;
+    }
+}
+
+void AppStateMachine::handleUsbSend(const String& text) {
+    String userText = Utf8::truncateBytes(text, CHAT_MAX_MESSAGE_TEXT);
+    userText.trim();
+    if (userText.length() == 0) {
+        usb_.sendError(F("Message is empty"));
+        return;
+    }
+
+    if (!network_.isStationConnected()) {
+        usb_.sendError(F("Device has no Wi-Fi"));
+        return;
+    }
+
+    // Show the conversation on the device screen while the PC is chatting.
+    // Photos queued on the device stay queued for its own next message.
+    if (cameraModeVisible_) {
+        exitCameraMode();
+    }
+    chatsMenuVisible_ = false;
+    clearChatsConfirmVisible_ = false;
+    chatScrollOffset_ = 0;
+    runChatTurn(userText, std::vector<PhotoAttachment>());
+    workUiDirty_ = true;
+}
+
+void AppStateMachine::announceState() {
+    const char* state = "boot";
+    switch (mode_) {
+        case AppMode::Work: state = "work"; break;
+        case AppMode::Configuration: state = "setup"; break;
+        case AppMode::Error: state = "error"; break;
+        case AppMode::Boot: state = "boot"; break;
+    }
+    usb_.sendState(state, mode_ == AppMode::Work ? activeChatTitle() : String(), config_.config().modelName);
+}
+
+void AppStateMachine::sendChatToUsb() {
+    usb_.sendHistory(chat_.messages(), activeChatTitle());
+}
+
+String AppStateMachine::activeChatTitle() const {
+    const int index = chat_.activeIndex();
+    if (index < 0 || static_cast<size_t>(index) >= chat_.sessions().size()) {
+        return String();
+    }
+    return chat_.sessions()[index].title;
 }
 
 void AppStateMachine::enterError(AppError error, const char* message) {
@@ -498,4 +614,5 @@ void AppStateMachine::enterError(AppError error, const char* message) {
     mode_ = AppMode::Error;
     display_.showError(error, message);
     Serial.printf("MyMicroAI error [%s]: %s\n", modeName(mode_), message);
+    announceState();
 }
