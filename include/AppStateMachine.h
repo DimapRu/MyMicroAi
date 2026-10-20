@@ -56,6 +56,8 @@ private:
     void enterCameraMode();
     void exitCameraMode();
     void capturePhotoToQueue();
+    void focusCameraAt(int16_t x, int16_t y);
+    void showCameraStatus(const __FlashStringHelper* status);
     void cleanupPendingPhotos();
     void sendCurrentMessage();
     bool runChatTurn(const String& userText, const std::vector<PhotoAttachment>& photos);

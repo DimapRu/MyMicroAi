@@ -6,6 +6,9 @@
 namespace {
 static constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 15000;
 static constexpr int32_t CHAT_SCROLL_STEP = 42;
+// Each photo is ~150-300 KB of JPEG and grows by a third as base64 in the request.
+static constexpr size_t MAX_PHOTOS_PER_MESSAGE = 4;
+static constexpr uint32_t CAMERA_FRAME_INTERVAL_MS = 150;
 
 const char* modeName(AppMode mode) {
     switch (mode) {
@@ -219,6 +222,9 @@ void AppStateMachine::updateWorkMode() {
             case ChatUiActionType::CapturePhoto:
                 capturePhotoToQueue();
                 return;
+            case ChatUiActionType::FocusAt:
+                focusCameraAt(action.x, action.y);
+                return;
             case ChatUiActionType::OpenChats:
                 keyboardVisible_ = false;
                 chatsMenuVisible_ = true;
@@ -355,29 +361,43 @@ void AppStateMachine::redrawCameraPreview(bool forceFrame) {
     }
 
     const uint32_t now = millis();
-    if (!forceFrame && now - lastCameraFrameMs_ < 190) {
+    if (!forceFrame && now - lastCameraFrameMs_ < CAMERA_FRAME_INTERVAL_MS) {
         return;
     }
 
     camera_.returnFrame(previewFrame_);
     previewFrame_ = camera_.capturePreviewFrame();
     lastCameraFrameMs_ = now;
-    display_.showCameraPreview(previewFrame_, pendingPhotos_.size(), workStatus_, forceFrame);
+    display_.showCameraPreview(previewFrame_, pendingPhotos_.size(), workStatus_, camera_.focusState(), forceFrame);
+}
+
+void AppStateMachine::showCameraStatus(const __FlashStringHelper* status) {
+    workStatus_ = status;
+    // No new frame: keep the last preview on screen and refresh the bars only.
+    display_.showCameraPreview(nullptr, pendingPhotos_.size(), workStatus_, camera_.focusState(), false);
 }
 
 void AppStateMachine::enterCameraMode() {
     keyboardVisible_ = false;
     chatsMenuVisible_ = false;
     clearChatsConfirmVisible_ = false;
-    workStatus_ = F("Starting camera...");
+    if (pendingPhotos_.size() >= MAX_PHOTOS_PER_MESSAGE) {
+        workStatus_ = F("Max 4 photos per message");
+        workUiDirty_ = true;
+        return;
+    }
+
     cameraModeVisible_ = true;
+    display_.clearFocusMarker();
+    workStatus_ = F("Starting camera...");
+    display_.showCameraPreview(nullptr, pendingPhotos_.size(), workStatus_, FocusState::Unavailable, true);
     if (!camera_.begin()) {
         cameraModeVisible_ = false;
         workStatus_ = camera_.lastError();
         workUiDirty_ = true;
         return;
     }
-    workStatus_ = F("Ready");
+    workStatus_ = camera_.focusState() == FocusState::Unavailable ? F("No autofocus") : F("Ready");
     redrawCameraPreview(true);
 }
 
@@ -386,8 +406,30 @@ void AppStateMachine::exitCameraMode() {
     camera_.returnFrame(previewFrame_);
     previewFrame_ = nullptr;
     camera_.end();
+    display_.clearFocusMarker();
     workStatus_ = F("Ready");
     workUiDirty_ = true;
+}
+
+void AppStateMachine::focusCameraAt(int16_t x, int16_t y) {
+    if (!cameraModeVisible_) {
+        return;
+    }
+
+    uint8_t gridX = 0;
+    uint8_t gridY = 0;
+    if (!display_.previewPointToFocusGrid(x, y, gridX, gridY)) {
+        return;
+    }
+    if (camera_.focusState() == FocusState::Unavailable) {
+        showCameraStatus(F("No autofocus"));
+        return;
+    }
+
+    display_.setFocusMarker(x, y);
+    showCameraStatus(F("Focusing..."));
+    workStatus_ = camera_.focusAt(gridX, gridY) ? F("Focus locked") : F("Focus missed");
+    redrawCameraPreview(true);
 }
 
 void AppStateMachine::capturePhotoToQueue() {
@@ -397,17 +439,18 @@ void AppStateMachine::capturePhotoToQueue() {
 
     camera_.returnFrame(previewFrame_);
     previewFrame_ = nullptr;
-    workStatus_ = F("Capturing...");
-    display_.showCameraPreview(nullptr, pendingPhotos_.size(), workStatus_, true);
+    showCameraStatus(camera_.focusState() == FocusState::Unavailable ? F("Capturing...") : F("Focusing..."));
     previewFrame_ = camera_.capturePhotoFrame();
     if (!previewFrame_) {
         cameraModeVisible_ = false;
         workStatus_ = camera_.lastError();
         camera_.end();
+        display_.clearFocusMarker();
         workUiDirty_ = true;
         redrawWorkMode();
         return;
     }
+    showCameraStatus(F("Saving..."));
 
     if (!SD.exists("/photos")) {
         SD.mkdir("/photos");
@@ -415,12 +458,17 @@ void AppStateMachine::capturePhotoToQueue() {
 
     const String label = String(F("photo")) + String(nextPhotoId_++);
     const String path = String(F("/photos/")) + label + F(".jpg");
+    const size_t photoBytes = previewFrame_->len;
+    const uint16_t photoWidth = previewFrame_->width;
+    const uint16_t photoHeight = previewFrame_->height;
+    const bool focusMissed = camera_.focusState() == FocusState::Failed;
     if (!camera_.saveFrameToFile(previewFrame_, path.c_str())) {
         cameraModeVisible_ = false;
         workStatus_ = camera_.lastError();
         camera_.returnFrame(previewFrame_);
         previewFrame_ = nullptr;
         camera_.end();
+        display_.clearFocusMarker();
         workUiDirty_ = true;
         redrawWorkMode();
         return;
@@ -431,11 +479,18 @@ void AppStateMachine::capturePhotoToQueue() {
         inputText_ += " ";
     }
     inputText_ += label;
-    workStatus_ = label + F(" queued");
+
+    char details[64];
+    snprintf(details, sizeof(details), " %ux%u %u KB%s", photoWidth, photoHeight,
+             static_cast<unsigned>((photoBytes + 512) / 1024), focusMissed ? ", soft focus" : "");
+    workStatus_ = label + details;
+    Serial.printf("Captured %s: %ux%u, %u bytes\n", label.c_str(), photoWidth, photoHeight, static_cast<unsigned>(photoBytes));
+
     cameraModeVisible_ = false;
     camera_.returnFrame(previewFrame_);
     previewFrame_ = nullptr;
     camera_.end();
+    display_.clearFocusMarker();
     lastCameraFrameMs_ = 0;
     workUiDirty_ = true;
     redrawWorkMode();

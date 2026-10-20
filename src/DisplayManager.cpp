@@ -21,6 +21,14 @@ static constexpr int32_t CHAT_INPUT_Y = 204;
 static constexpr int32_t KEYBOARD_Y = 0;
 static constexpr int32_t KEYBOARD_SCREEN_W = 320;
 static constexpr int32_t KEYBOARD_SCREEN_H = 240;
+// Camera screen: the 4:3 preview is fitted into the area between the bars.
+static constexpr int32_t PREVIEW_AREA_Y = 28;
+static constexpr int32_t PREVIEW_AREA_H = 170;
+static constexpr int32_t PREVIEW_IMAGE_H = PREVIEW_AREA_H;
+static constexpr int32_t PREVIEW_IMAGE_W = (PREVIEW_AREA_H * 4 + 2) / 3;
+static constexpr int32_t PREVIEW_IMAGE_X = (320 - PREVIEW_IMAGE_W) / 2;
+static constexpr int32_t CAPTURE_BUTTON_X = 105;
+static constexpr int32_t CAPTURE_BUTTON_W = 110;
 static constexpr int32_t ERROR_BUTTON_Y = 186;
 static constexpr int32_t ERROR_BUTTON_W = 140;
 static constexpr int32_t ERROR_BUTTON_H = 42;
@@ -376,7 +384,7 @@ void DisplayManager::showChatWorkMode(const std::vector<ChatSessionInfo>& sessio
     }
 }
 
-void DisplayManager::showCameraPreview(camera_fb_t* frame, size_t queuedPhotos, const String& statusText, bool fullRedraw) {
+void DisplayManager::showCameraPreview(camera_fb_t* frame, size_t queuedPhotos, const String& statusText, FocusState focus, bool fullRedraw) {
     if (!ready_) {
         return;
     }
@@ -386,11 +394,11 @@ void DisplayManager::showCameraPreview(camera_fb_t* frame, size_t queuedPhotos, 
     chatsMenuVisible_ = false;
     clearChatsConfirmVisible_ = false;
     workButtonVisible_ = false;
+    errorButtonsVisible_ = false;
     display_.setTextSize(1);
 
     if (fullRedraw) {
         display_.fillScreen(COLOR_BACKGROUND);
-        display_.fillRect(0, 0, 320, 28, COLOR_BACKGROUND);
         display_.drawRoundRect(284, 4, 30, 22, 5, COLOR_MUTED);
         display_.setTextColor(COLOR_MUTED, COLOR_BACKGROUND);
         display_.setCursor(296, 12);
@@ -400,35 +408,79 @@ void DisplayManager::showCameraPreview(camera_fb_t* frame, size_t queuedPhotos, 
         display_.setCursor(10, 10);
         display_.print("PHOTO");
 
-        display_.fillRect(0, 198, 320, 42, COLOR_BACKGROUND);
-        display_.drawFastHLine(12, 198, 296, COLOR_MUTED);
-        display_.fillRoundRect(105, 206, 110, 28, 7, COLOR_ACCENT);
+        display_.drawFastHLine(12, PREVIEW_AREA_Y + PREVIEW_AREA_H, 296, COLOR_MUTED);
+        display_.fillRoundRect(CAPTURE_BUTTON_X, 206, CAPTURE_BUTTON_W, 28, 7, COLOR_ACCENT);
         display_.setTextColor(COLOR_BACKGROUND, COLOR_ACCENT);
-        display_.setCursor(128, 217);
-        display_.print("SEND PHOTO");
+        display_.setCursor(CAPTURE_BUTTON_X + 31, 217);
+        display_.print("CAPTURE");
+        display_.setTextColor(COLOR_MUTED, COLOR_BACKGROUND);
+        display_.setCursor(226, 217);
+        display_.print("tap = focus");
     }
 
     if (frame && frame->buf && frame->len > 0) {
-        display_.drawJpg(frame->buf, frame->len, 0, 28, 320, 170, 0, 0, 1.0f, 1.0f, datum_t::top_left);
+        // Zoom 0 fits the whole frame, so the preview shows exactly what the photo will.
+        display_.drawJpg(frame->buf, frame->len, 0, PREVIEW_AREA_Y, 320, PREVIEW_AREA_H, 0, 0, 0.0f, 0.0f, datum_t::middle_center);
+        display_.clearClipRect();
     } else if (fullRedraw) {
-        display_.drawRoundRect(12, 58, 296, 104, 10, COLOR_MUTED);
+        display_.drawRoundRect(PREVIEW_IMAGE_X, PREVIEW_AREA_Y + 4, PREVIEW_IMAGE_W, PREVIEW_IMAGE_H - 8, 10, COLOR_MUTED);
         display_.setTextColor(COLOR_MUTED, COLOR_BACKGROUND);
-        display_.setCursor(92, 106);
+        display_.setCursor(PREVIEW_IMAGE_X + 70, PREVIEW_AREA_Y + 80);
         display_.print("camera preview");
     }
 
-    if (fullRedraw || statusText.length() > 0) {
-        display_.fillRect(64, 6, 160, 16, COLOR_BACKGROUND);
-        display_.setTextColor(COLOR_MUTED, COLOR_BACKGROUND);
-        display_.setCursor(70, 10);
-        display_.printf("queued %u", static_cast<unsigned>(queuedPhotos));
-
-        display_.fillRect(8, 216, 84, 14, COLOR_BACKGROUND);
-        if (statusText.length() > 0) {
-            display_.setCursor(10, 217);
-            display_.print(Utf8::prefixChars(statusText, 14));
-        }
+    uint16_t focusColor = COLOR_MUTED;
+    const char* focusLabel = "AF off";
+    switch (focus) {
+        case FocusState::Continuous: focusLabel = "AF auto"; focusColor = COLOR_TEXT; break;
+        case FocusState::Focusing: focusLabel = "AF ..."; focusColor = COLOR_TEXT; break;
+        case FocusState::Locked: focusLabel = "AF lock"; focusColor = COLOR_ACCENT; break;
+        case FocusState::Failed: focusLabel = "AF miss"; focusColor = COLOR_MUTED; break;
+        case FocusState::Unavailable: break;
     }
+
+    if (focusMarkerX_ >= 0 && focus != FocusState::Unavailable) {
+        const int32_t boxW = 34;
+        const int32_t boxH = 26;
+        const int32_t boxX = constrain(focusMarkerX_ - boxW / 2, PREVIEW_IMAGE_X, PREVIEW_IMAGE_X + PREVIEW_IMAGE_W - boxW);
+        const int32_t boxY = constrain(focusMarkerY_ - boxH / 2, PREVIEW_AREA_Y, PREVIEW_AREA_Y + PREVIEW_IMAGE_H - boxH);
+        display_.drawRect(boxX, boxY, boxW, boxH, focusColor);
+        display_.drawRect(boxX + 1, boxY + 1, boxW - 2, boxH - 2, focusColor);
+    }
+
+    display_.fillRect(64, 6, 214, 16, COLOR_BACKGROUND);
+    display_.setTextColor(COLOR_MUTED, COLOR_BACKGROUND);
+    display_.setCursor(70, 10);
+    display_.printf("queued %u", static_cast<unsigned>(queuedPhotos));
+    display_.setTextColor(focusColor, COLOR_BACKGROUND);
+    display_.setCursor(150, 10);
+    display_.print(focusLabel);
+
+    display_.fillRect(8, 205, 94, 30, COLOR_BACKGROUND);
+    if (statusText.length() > 0) {
+        display_.setTextColor(COLOR_TEXT, COLOR_BACKGROUND);
+        display_.setCursor(10, 217);
+        display_.print(Utf8::prefixChars(statusText, 15));
+    }
+}
+
+void DisplayManager::setFocusMarker(int16_t x, int16_t y) {
+    focusMarkerX_ = x;
+    focusMarkerY_ = y;
+}
+
+void DisplayManager::clearFocusMarker() {
+    focusMarkerX_ = -1;
+    focusMarkerY_ = -1;
+}
+
+bool DisplayManager::previewPointToFocusGrid(int16_t x, int16_t y, uint8_t& gridX, uint8_t& gridY) const {
+    if (x < PREVIEW_IMAGE_X || x >= PREVIEW_IMAGE_X + PREVIEW_IMAGE_W || y < PREVIEW_AREA_Y || y >= PREVIEW_AREA_Y + PREVIEW_IMAGE_H) {
+        return false;
+    }
+    gridX = static_cast<uint8_t>((x - PREVIEW_IMAGE_X) * Ov5640Af::GRID_W / PREVIEW_IMAGE_W);
+    gridY = static_cast<uint8_t>((y - PREVIEW_AREA_Y) * Ov5640Af::GRID_H / PREVIEW_IMAGE_H);
+    return true;
 }
 
 void DisplayManager::showError(AppError error, const char* message) {
@@ -504,8 +556,14 @@ bool DisplayManager::pollChatAction(ChatUiAction& action) {
             action.type = ChatUiActionType::CloseCamera;
             return true;
         }
-        if (x >= 92 && x <= 228 && y >= 200 && y <= 238) {
+        if (x >= CAPTURE_BUTTON_X - 13 && x <= CAPTURE_BUTTON_X + CAPTURE_BUTTON_W + 13 && y >= 200 && y <= 238) {
             action.type = ChatUiActionType::CapturePhoto;
+            return true;
+        }
+        if (y >= PREVIEW_AREA_Y && y < PREVIEW_AREA_Y + PREVIEW_AREA_H) {
+            action.type = ChatUiActionType::FocusAt;
+            action.x = static_cast<int16_t>(x);
+            action.y = static_cast<int16_t>(y);
             return true;
         }
         return false;

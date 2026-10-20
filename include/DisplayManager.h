@@ -6,6 +6,7 @@
 #include <vector>
 #include "esp_camera.h"
 #include "AppTypes.h"
+#include "CameraManager.h"
 #include "ChatManager.h"
 
 class MyMicroAIDisplay : public lgfx::LGFX_Device {
@@ -36,6 +37,7 @@ enum class ChatUiActionType : uint8_t {
     OpenCamera,
     CloseCamera,
     CapturePhoto,
+    FocusAt,
     Backspace,
     Character,
     LayoutSwitch,
@@ -47,6 +49,8 @@ struct ChatUiAction {
     ChatUiActionType type = ChatUiActionType::None;
     String text;
     int index = -1;
+    int16_t x = -1;
+    int16_t y = -1;
 };
 
 enum class ErrorUiAction : uint8_t {
@@ -78,7 +82,11 @@ public:
                           bool chatsMenuVisible,
                           int chatsMenuOffset,
                           bool clearChatsConfirmVisible);
-    void showCameraPreview(camera_fb_t* frame, size_t queuedPhotos, const String& statusText, bool fullRedraw);
+    void showCameraPreview(camera_fb_t* frame, size_t queuedPhotos, const String& statusText, FocusState focus, bool fullRedraw);
+    void setFocusMarker(int16_t x, int16_t y);
+    void clearFocusMarker();
+    // Maps a screen point inside the camera preview to the sensor's AF grid.
+    bool previewPointToFocusGrid(int16_t x, int16_t y, uint8_t& gridX, uint8_t& gridY) const;
     void showError(AppError error, const char* message);
     void showStatus(const char* title, const char* message);
     void refreshKeyboardPreview(const String& inputText);
@@ -97,6 +105,8 @@ private:
     bool clearChatsConfirmVisible_ = false;
     bool cameraPreviewVisible_ = false;
     bool errorButtonsVisible_ = false;
+    int16_t focusMarkerX_ = -1;
+    int16_t focusMarkerY_ = -1;
     int32_t chatMaxScroll_ = 0;
     int chatsMenuOffset_ = 0;
     KeyboardLayout keyboardLayout_ = KeyboardLayout::English;

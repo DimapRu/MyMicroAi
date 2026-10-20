@@ -1,0 +1,2 @@
+# Only needed for --backend api (the claude-code backend uses the Claude Code CLI).
+anthropic>=1.17,<2

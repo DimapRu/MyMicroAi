@@ -3,6 +3,16 @@
 #include <SD.h>
 #include <esp_err.h>
 
+namespace {
+static constexpr int PREVIEW_QUALITY = 14;
+// Lower number = better JPEG. 12 keeps a detailed 1600x1200 shot (typically
+// 150-300 KB) inside the driver's frame buffer, which is sized width*height/5.
+static constexpr int CAPTURE_QUALITY = 12;
+static constexpr uint32_t FOCUS_TIMEOUT_MS = 1800;
+// A lock from a tap-to-focus is reused for a capture shortly after it.
+static constexpr uint32_t FOCUS_LOCK_REUSE_MS = 8000;
+}
+
 bool CameraManager::begin() {
     if (ready_) {
         return true;
@@ -38,9 +48,11 @@ bool CameraManager::begin() {
     config.pin_reset = BoardPins::CAM_RESET;
     config.xclk_freq_hz = 20000000;
     config.pixel_format = PIXFORMAT_JPEG;
-    config.frame_size = FRAMESIZE_HVGA;
-    config.jpeg_quality = 18;
-    config.fb_count = 1;
+    // Frame buffers are allocated for the init size, so init at the largest
+    // size we capture and switch down to the preview size afterwards.
+    config.frame_size = CAPTURE_SIZE;
+    config.jpeg_quality = CAPTURE_QUALITY;
+    config.fb_count = 2;
     config.fb_location = CAMERA_FB_IN_PSRAM;
     config.grab_mode = CAMERA_GRAB_LATEST;
 
@@ -52,6 +64,18 @@ bool CameraManager::begin() {
 
     ready_ = true;
     configureSensor();
+
+    focusState_ = FocusState::Unavailable;
+    focusLockedAtMs_ = 0;
+    if (af_.begin(esp_camera_sensor_get())) {
+        Serial.printf("OV5640 AF firmware loaded in %lu ms\n", static_cast<unsigned long>(af_.lastLoadMs()));
+        if (af_.startContinuous()) {
+            focusState_ = FocusState::Continuous;
+        }
+    } else {
+        Serial.printf("Autofocus unavailable: %s\n", af_.lastError());
+    }
+
     lastError_ = "";
     return true;
 }
@@ -64,6 +88,7 @@ void CameraManager::end() {
     esp_camera_deinit();
     ready_ = false;
     captureMode_ = false;
+    focusState_ = FocusState::Unavailable;
     pinMode(BoardPins::CAM_PWDN, OUTPUT);
     digitalWrite(BoardPins::CAM_PWDN, HIGH);
     lastError_ = "";
@@ -82,14 +107,54 @@ camera_fb_t* CameraManager::capturePreviewFrame() {
 }
 
 camera_fb_t* CameraManager::capturePhotoFrame() {
+    if (!ready_ && !begin()) {
+        return nullptr;
+    }
+
+    // Focus on the preview stream first: AF works on live frames and is
+    // faster at the small size. A recent tap-to-focus lock is kept as is.
+    const bool recentLock = focusState_ == FocusState::Locked && millis() - focusLockedAtMs_ < FOCUS_LOCK_REUSE_MS;
+    if (af_.isAvailable() && !recentLock) {
+        focusState_ = FocusState::Focusing;
+        if (af_.focusOnce(FOCUS_TIMEOUT_MS)) {
+            focusState_ = FocusState::Locked;
+            focusLockedAtMs_ = millis();
+        } else {
+            // Still take the picture; a slightly soft photo beats none.
+            focusState_ = FocusState::Failed;
+        }
+    }
+
     if (!setCaptureMode()) {
         return nullptr;
     }
 
-    camera_fb_t* warmup = captureFrame();
-    returnFrame(warmup);
-    delay(80);
-    return captureFrame();
+    // Drop frames still in flight at the old size, then one more so exposure
+    // settles after the mode switch.
+    camera_fb_t* settle = captureFrameOfSize(CAPTURE_SIZE, 4);
+    returnFrame(settle);
+    return captureFrameOfSize(CAPTURE_SIZE, 3);
+}
+
+bool CameraManager::focusAt(uint8_t gridX, uint8_t gridY) {
+    if (!ready_ || !af_.isAvailable()) {
+        setError(F("Autofocus not available"));
+        return false;
+    }
+    if (!setPreviewMode()) {
+        return false;
+    }
+
+    focusState_ = FocusState::Focusing;
+    if (!af_.focusAt(gridX, gridY, FOCUS_TIMEOUT_MS)) {
+        focusState_ = FocusState::Failed;
+        setError(af_.lastError());
+        return false;
+    }
+
+    focusState_ = FocusState::Locked;
+    focusLockedAtMs_ = millis();
+    return true;
 }
 
 camera_fb_t* CameraManager::captureFrame() {
@@ -110,6 +175,23 @@ camera_fb_t* CameraManager::captureFrame() {
     }
 
     return frame;
+}
+
+camera_fb_t* CameraManager::captureFrameOfSize(framesize_t size, uint8_t maxAttempts) {
+    const uint16_t expectedWidth = resolution[size].width;
+    for (uint8_t attempt = 0; attempt < maxAttempts; ++attempt) {
+        camera_fb_t* frame = captureFrame();
+        if (!frame) {
+            return nullptr;
+        }
+        if (frame->width == expectedWidth) {
+            return frame;
+        }
+        returnFrame(frame);
+    }
+
+    setError(F("Camera did not switch resolution"));
+    return nullptr;
 }
 
 void CameraManager::returnFrame(camera_fb_t* frame) {
@@ -141,6 +223,14 @@ bool CameraManager::saveFrameToFile(camera_fb_t* frame, const char* path) {
     return true;
 }
 
+FocusState CameraManager::focusState() const {
+    return focusState_;
+}
+
+const char* CameraManager::focusError() const {
+    return af_.lastError();
+}
+
 const char* CameraManager::lastError() const {
     return lastError_.c_str();
 }
@@ -160,9 +250,9 @@ bool CameraManager::setPreviewMode() {
         return false;
     }
 
-    sensor->set_quality(sensor, 18);
+    sensor->set_framesize(sensor, PREVIEW_SIZE);
+    sensor->set_quality(sensor, PREVIEW_QUALITY);
     captureMode_ = false;
-    delay(60);
     return true;
 }
 
@@ -181,9 +271,12 @@ bool CameraManager::setCaptureMode() {
         return false;
     }
 
-    sensor->set_quality(sensor, 10);
+    sensor->set_quality(sensor, CAPTURE_QUALITY);
+    if (sensor->set_framesize(sensor, CAPTURE_SIZE) != 0) {
+        setError(F("Capture resolution failed"));
+        return false;
+    }
     captureMode_ = true;
-    delay(140);
     return true;
 }
 
@@ -205,8 +298,8 @@ void CameraManager::configureSensor() {
     sensor->set_awb_gain(sensor, 1);
     sensor->set_exposure_ctrl(sensor, 1);
     sensor->set_aec2(sensor, 1);
-    sensor->set_quality(sensor, 18);
-    sensor->set_framesize(sensor, FRAMESIZE_HVGA);
+    sensor->set_quality(sensor, PREVIEW_QUALITY);
+    sensor->set_framesize(sensor, PREVIEW_SIZE);
     captureMode_ = false;
 }
 
