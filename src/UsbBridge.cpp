@@ -143,10 +143,13 @@ bool UsbBridge::parseCommand(const String& line, UsbCommand& command) {
 }
 
 void UsbBridge::emit(const JsonDocument& document) {
+    // serializeJson() replaces a String's contents, so encode first, then prefix.
+    String json;
+    serializeJson(document, json);
     String line;
-    line.reserve(measureJson(document) + 8);
+    line.reserve(json.length() + 8);
     line += LINE_PREFIX;
-    serializeJson(document, line);
+    line += json;
     line += '\n';
     // A single write keeps the line from being split by other log output.
     active_->print(line);
